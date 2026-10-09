@@ -1,6 +1,10 @@
 package yyz.chl.phantomcontrol.command;
 
 import org.bukkit.OfflinePlayer;
+import org.bukkit.Bukkit;
+import java.util.concurrent.CompletableFuture;
+import java.util.ArrayList;
+import java.util.List;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -143,69 +147,77 @@ public class PhantomControlCommand implements CommandExecutor {
 
         String targetPlayerName = args[2];
 
-        // 先查在线玩家，再查离线玩家
-        Player targetPlayer = org.bukkit.Bukkit.getPlayer(targetPlayerName);
-        boolean targetOffline = (targetPlayer == null);
-        java.util.UUID targetUuid = null;
-
-        if (targetOffline) {
-            OfflinePlayer offlinePlayer = resolveOfflinePlayer(targetPlayerName);
-            if (offlinePlayer == null) {
-                String message = configManager.formatMessage(player, "admin.player-not-found", "%player%", targetPlayerName);
-                messageUtil.sendMessage(player, message);
-                return;
-            }
-            targetUuid = offlinePlayer.getUniqueId();
-        }
-
-        switch (adminSubCommand) {
-            case "enable":
-                if (targetOffline) {
-                    plugin.getDatabaseManager().setPlayerPhantomsStatusDirect(targetUuid, true);
-                } else {
-                    enablePlayer(targetPlayer, PhantomStatusChangeSource.ADMIN_COMMAND);
-                }
-                String enableMsg = configManager.formatMessage(player, "admin.enable-success", "%player%", targetPlayerName);
-                messageUtil.sendMessage(player, enableMsg);
-                break;
-            case "disable":
-                boolean disabled;
-                if (targetOffline) {
-                    plugin.getDatabaseManager().setPlayerPhantomsStatusDirect(targetUuid, false);
-                    disabled = true;
-                } else {
-                    disabled = disablePlayer(targetPlayer, PhantomStatusChangeSource.ADMIN_COMMAND);
-                }
-                if (disabled) {
-                    String disableMsg = configManager.formatMessage(player, "admin.disable-success", "%player%", targetPlayerName);
-                    messageUtil.sendMessage(player, disableMsg);
-                } else {
-                    String blockedMsg = configManager.formatMessage(player, "admin.disable-blocked", "%player%", targetPlayerName);
-                    messageUtil.sendMessage(player, blockedMsg);
-                }
-                break;
-            case "status":
-                boolean status;
-                if (targetOffline) {
-                    status = plugin.getDatabaseManager().getPlayerPhantomsStatusDirect(targetUuid);
-                } else {
-                    status = phantomManager.hasPhantomsEnabled(targetPlayer);
-                }
-                String statusText = status ? configManager.getMessage(player, "admin.status-enabled") : configManager.getMessage(player, "admin.status-disabled");
-                String statusMsg = configManager.formatMessage(player, "admin.status", "%player%", targetPlayerName, "%status%", statusText);
-                if (targetOffline) {
-                    statusMsg += " " + configManager.getMessage(player, "admin.status-offline");
-                }
-                messageUtil.sendMessage(player, statusMsg);
-                break;
-            default:
-                String invalidMsg = configManager.formatMessage(
-                        player, "admin.invalid-subcommand", "%maincommand%", registeredMainCommand);
-                messageUtil.sendMessage(player, invalidMsg);
-                break;
-        }
+        performAdminAction(targetPlayerName, adminSubCommand).whenComplete((result, error) ->
+                player.getScheduler().run(plugin, task -> {
+                    if (error != null || (result.found() && !result.success())) {
+                        messageUtil.sendMessage(player, configManager.formatMessage(player,
+                                "admin.change-failed", "%player%", targetPlayerName));
+                    } else if (!result.found()) {
+                        messageUtil.sendMessage(player, configManager.formatMessage(player,
+                                "admin.player-not-found", "%player%", targetPlayerName));
+                    } else if (adminSubCommand.equals("status")) {
+                        String status = configManager.getMessage(player,
+                                result.enabled() ? "admin.status-enabled" : "admin.status-disabled");
+                        String message = configManager.formatMessage(player, "admin.status",
+                                "%player%", targetPlayerName, "%status%", status);
+                        if (result.offline()) message += " " + configManager.getMessage(player, "admin.status-offline");
+                        messageUtil.sendMessage(player, message);
+                    } else {
+                        messageUtil.sendMessage(player, configManager.formatMessage(player,
+                                "admin." + adminSubCommand + "-success", "%player%", targetPlayerName));
+                    }
+                }, () -> {}));
     }
-    
+
+    private record AdminResult(boolean found, boolean success, boolean enabled, boolean offline) {}
+
+    private CompletableFuture<AdminResult> performAdminAction(String name, String action) {
+        Player online = Bukkit.getPlayer(name);
+        if (online != null) return performOnlineAction(online, action);
+        CompletableFuture<AdminResult> result = new CompletableFuture<>();
+        Bukkit.getAsyncScheduler().runNow(plugin, task -> {
+            try {
+                OfflinePlayer offline = resolveOfflinePlayer(name);
+                if (offline == null) {
+                    result.complete(new AdminResult(false, false, true, true));
+                    return;
+                }
+                Player joined = Bukkit.getPlayer(offline.getUniqueId());
+                CompletableFuture<AdminResult> operation;
+                if (joined != null) operation = performOnlineAction(joined, action);
+                else if (action.equals("status")) {
+                    operation = plugin.getDatabaseManager().getPlayerPhantomsStatusAsync(offline.getUniqueId())
+                            .thenApply(value -> new AdminResult(true, true, value, true));
+                } else {
+                    boolean enabled = action.equals("enable");
+                    operation = plugin.getDatabaseManager().setPlayerPhantomsStatusAsync(offline.getUniqueId(), enabled)
+                            .thenApply(success -> new AdminResult(true, success, enabled, true));
+                }
+                operation.whenComplete((value, error) -> {
+                    if (error != null) result.completeExceptionally(error);
+                    else result.complete(value);
+                });
+            } catch (RuntimeException error) { result.completeExceptionally(error); }
+        });
+        return result;
+    }
+
+    private CompletableFuture<AdminResult> performOnlineAction(Player target, String action) {
+        CompletableFuture<AdminResult> result = new CompletableFuture<>();
+        Runnable retired = () -> result.complete(new AdminResult(true, false, true, false));
+        if (target.getScheduler().run(plugin, task -> {
+            try {
+                boolean success = switch (action) {
+                    case "enable" -> enablePlayer(target, PhantomStatusChangeSource.ADMIN_COMMAND);
+                    case "disable" -> disablePlayer(target, PhantomStatusChangeSource.ADMIN_COMMAND);
+                    default -> true;
+                };
+                result.complete(new AdminResult(true, success, phantomManager.hasPhantomsEnabled(target), false));
+            } catch (RuntimeException error) { result.completeExceptionally(error); }
+        }, retired) == null) retired.run();
+        return result;
+    }
+
     private void showHelp(Player player) {
         String mainCommand = registeredMainCommand;
         String reloadCommand = registeredReloadCommand;
@@ -241,55 +253,22 @@ public class PhantomControlCommand implements CommandExecutor {
             return;
         }
 
-        int successCount = 0;
-        int failCount = 0;
-
+        List<CompletableFuture<Boolean>> operations = new ArrayList<>();
         for (int i = 3; i < args.length; i++) {
-            String targetPlayerName = args[i];
-            Player targetPlayer = org.bukkit.Bukkit.getPlayer(targetPlayerName);
-
-            if (targetPlayer != null) {
-                // 在线玩家：走正常流程
-                if (batchSubCommand.equals("enable")) {
-                    if (enablePlayer(targetPlayer, PhantomStatusChangeSource.ADMIN_COMMAND)) {
-                        successCount++;
-                    } else {
-                        failCount++;
-                    }
-                } else {
-                    if (disablePlayer(targetPlayer, PhantomStatusChangeSource.ADMIN_COMMAND)) {
-                        successCount++;
-                    } else {
-                        failCount++;
-                    }
-                }
-            } else {
-                // 尝试离线玩家
-                OfflinePlayer offlinePlayer = resolveOfflinePlayer(targetPlayerName);
-                if (offlinePlayer != null) {
-                    boolean enabled = batchSubCommand.equals("enable");
-                    plugin.getDatabaseManager().setPlayerPhantomsStatusDirect(offlinePlayer.getUniqueId(), enabled);
-                    successCount++;
-                } else {
-                    failCount++;
-                }
-            }
+            operations.add(performAdminAction(args[i], batchSubCommand)
+                    .handle((result, error) -> error == null && result.found() && result.success()));
         }
-
-        String action = batchSubCommand.equals("enable")
-            ? configManager.getMessage(player, "command.status_enabled", "Enabled")
-            : configManager.getMessage(player, "command.status_disabled", "Disabled");
-        String batchResult = configManager.formatMessage(player, "admin.batch-success",
-            "%action%", action,
-            "%success%", String.valueOf(successCount),
-            "%fail%", String.valueOf(failCount));
-        messageUtil.sendMessage(player, batchResult);
-
-        if (configManager.isDebugEnabled()) {
-            plugin.getLogger().info("管理员 " + player.getName() + " 批量" + action + "幻翼: 成功 " + successCount + " 个, 失败 " + failCount + " 个");
-        }
+        CompletableFuture.allOf(operations.toArray(CompletableFuture[]::new)).thenRun(() ->
+                player.getScheduler().run(plugin, task -> {
+                    long successCount = operations.stream().filter(CompletableFuture::join).count();
+                    String action = configManager.getMessage(player, batchSubCommand.equals("enable")
+                            ? "command.status_enabled" : "command.status_disabled");
+                    messageUtil.sendMessage(player, configManager.formatMessage(player, "admin.batch-success",
+                            "%action%", action, "%success%", String.valueOf(successCount),
+                            "%fail%", String.valueOf(operations.size() - successCount)));
+                }, () -> {}));
     }
-    
+
     private boolean enablePlayer(Player player) {
         return enablePlayer(player, PhantomStatusChangeSource.COMMAND);
     }

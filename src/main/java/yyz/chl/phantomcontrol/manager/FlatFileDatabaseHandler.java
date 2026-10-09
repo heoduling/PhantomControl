@@ -5,6 +5,10 @@ import yyz.chl.phantomcontrol.PhantomControl;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.AtomicMoveNotSupportedException;
+import org.bukkit.configuration.InvalidConfigurationException;
 import java.util.Map;
 import java.util.UUID;
 
@@ -19,7 +23,14 @@ public class FlatFileDatabaseHandler implements DatabaseHandler {
     public FlatFileDatabaseHandler(PhantomControl plugin) {
         this.plugin = plugin;
         this.dataFile = new File(plugin.getDataFolder(), "playerdata.yml");
-        this.dataConfig = YamlConfiguration.loadConfiguration(dataFile);
+        this.dataConfig = new YamlConfiguration();
+        if (dataFile.exists()) {
+            try {
+                dataConfig.load(dataFile);
+            } catch (IOException | InvalidConfigurationException error) {
+                throw new IllegalStateException("玩家数据文件读取失败，已停止以保护原文件", error);
+            }
+        }
     }
     
     @Override
@@ -32,7 +43,7 @@ public class FlatFileDatabaseHandler implements DatabaseHandler {
             try {
                 dataFile.createNewFile();
             } catch (IOException e) {
-                plugin.getLogger().severe("无法创建玩家数据文件: " + e.getMessage());
+                throw new IllegalStateException("无法创建玩家数据文件", e);
             }
         }
     }
@@ -78,10 +89,20 @@ public class FlatFileDatabaseHandler implements DatabaseHandler {
     
     private void saveConfig() {
         try {
-            dataConfig.save(dataFile);
+            java.nio.file.Path temporary = Files.createTempFile(dataFile.toPath().getParent(), "playerdata-", ".tmp");
+            try {
+                dataConfig.save(temporary.toFile());
+                try {
+                    Files.move(temporary, dataFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException ignored) {
+                    Files.move(temporary, dataFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
             dirty = false;
         } catch (IOException e) {
-            plugin.getLogger().severe("无法保存玩家数据: " + e.getMessage());
+            throw new IllegalStateException("无法保存玩家数据", e);
         }
     }
 }

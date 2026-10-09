@@ -25,27 +25,27 @@ public class ReloadCommand implements CommandExecutor {
             return true;
         }
         
-        try {
-            PhantomControl.ReloadResult result = plugin.reloadAll();
-            
-            sender.sendMessage(configManager.getMessage("reload-command.success"));
-            if (result.commandsRequireRestart()) {
-                sender.sendMessage(configManager.getMessage(
-                        "reload-command.commands-restart-required",
-                        "Command names or aliases changed. Restart the server to apply them."));
+        plugin.reloadAllAsync().whenComplete((result, error) -> {
+            Runnable reply = () -> {
+                if (error != null) {
+                    sender.sendMessage(configManager.formatMessage("reload-command.error", "%error%",
+                            String.valueOf(error.getMessage())));
+                    plugin.getLogger().log(Level.SEVERE, "重载配置失败", error);
+                    return;
+                }
+                sender.sendMessage(configManager.getMessage("reload-command.success"));
+                if (result.commandsRequireRestart()) {
+                    sender.sendMessage(configManager.getMessage("reload-command.commands-restart-required"));
+                }
+                plugin.getLogger().info(sender.getName() + " 重载了插件配置");
+            };
+            if (sender instanceof org.bukkit.entity.Player player) {
+                player.getScheduler().run(plugin, task -> reply.run(), () -> {});
+            } else {
+                org.bukkit.Bukkit.getGlobalRegionScheduler().execute(plugin, reply);
             }
-            plugin.getLogger().info(sender.getName() + " 重载了插件配置");
-        } catch (Exception e) {
-            String detail = e.getMessage();
-            if (detail == null || detail.isBlank()) {
-                detail = e.getClass().getSimpleName();
-            }
-            String errorMessage = configManager.formatMessage(
-                    "reload-command.error", "%error%", detail);
-            sender.sendMessage(errorMessage);
-            plugin.getLogger().log(Level.SEVERE, "重载配置失败", e);
-        }
-        
+        });
+
         return true;
     }
 }

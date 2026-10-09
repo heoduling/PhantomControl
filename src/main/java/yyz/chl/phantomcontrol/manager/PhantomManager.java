@@ -70,7 +70,7 @@ public class PhantomManager {
 
         UUID playerId = player.getUniqueId();
         boolean oldEnabled = databaseManager.getPlayerPhantomsStatus(playerId);
-        if (oldEnabled == enabled) {
+        if (oldEnabled == enabled && databaseManager.isPlayerDataLoaded(playerId)) {
             return true;
         }
 

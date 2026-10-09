@@ -1,6 +1,6 @@
 # PhantomControl Message Configuration File
 # 配置文件版本（请勿手动修改，升级插件时会自动更新）
-config-version: 3
+config-version: 4
 
 # Main command messages
 command:
@@ -23,6 +23,8 @@ reload-command:
 
 # Admin command messages
 admin:
+  # 修改被拒绝或保存失败时显示，不能报告成功
+  change-failed: "&cCould not change %player%: cancelled, player disconnected, or storage failed."
   usage: "&cUsage: /%maincommand% admin <enable|disable|status|batch|server> <arguments>"
   player-not-found: "&cPlayer %player% not found!"
   enable-success: "&a✅ Successfully enabled phantoms for player %player%, phantoms will spawn normally!"

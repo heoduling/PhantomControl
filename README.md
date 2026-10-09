@@ -1,3 +1,5 @@
+> 此分支修复版：**2.1.1-2**。已移除 bStats；完整变更和隔离服测试见 [FIXES.md](FIXES.md)。
+
 # PhantomControl 插件文档
 
 ![Version](https://img.shields.io/badge/版本-v2.1.1-blue)
@@ -40,7 +42,6 @@ Minecraft 高版本机制中，长时间未睡觉的玩家会被幻翼攻击，�
 
 - **开发者 API**：提供异步读写、自定义事件，支持第三方插件联动
 
-- **数据统计功能**：集成 bStats 开源统计，可自由开关数据上报
 
 - **调试与校验机制**：可开启详细日志排查问题，自动校验配置文件完整性，异常安全禁用
 
@@ -102,8 +103,6 @@ settings:
     language:
       mode: "auto" # 语言模式：auto自动/chinese中文/english英文
       default: "messages_en" # 默认语言文件
-  bstats:
-    enabled: true # 是否开启bStats数据统计
 ```
 
 ### 4. GUI 界面自定义配置
@@ -287,19 +286,13 @@ public class PhantomListener implements Listener {
 
 不会。插件通过 Paper 原生事件**拦截幻翼生成行为**，不会修改玩家 `TIME_SINCE_REST` 睡眠统计数值。
 
-**Q4：如何关闭bStats数据统计？**
+**Q4：这个修复版本是否上报统计？**
 
-修改配置文件中 `settings.bstats.enabled: false`，重载配置即可关闭。
+已移除 bStats 代码与依赖；旧配置中的统计开关不再生效。
 
 **Q5：如何开启调试日志？**
 
 将 `settings.debug.enabled` 改为 `true`，重载配置后控制台将输出详细运行日志，便于排查问题。
-
-## 📊 bStats 数据统计
-
-PhantomControl 集成 **bStats 服务器统计**，用于匿名统计插件装机量、服务端版本等公开数据，帮助作者迭代优化插件。该功能不主动收集玩家隐私数据，正常情况下不会明显影响服务器性能。
-
-![bStats](https://bstats.org/signatures/bukkit/PhantomControl.svg)
 
 ## 📌 开发者与开源信息
 

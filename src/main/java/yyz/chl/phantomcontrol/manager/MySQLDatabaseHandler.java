@@ -47,9 +47,10 @@ public class MySQLDatabaseHandler implements DatabaseHandler {
         hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250");
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
         hikariConfig.addDataSourceProperty("useServerPrepStmts", "true");
-        hikariConfig.addDataSourceProperty("useSSL", "false");
         hikariConfig.addDataSourceProperty("characterEncoding", "utf8");
         hikariConfig.addDataSourceProperty("serverTimezone", "UTC");
+        hikariConfig.addDataSourceProperty("connectTimeout", "5000");
+        hikariConfig.addDataSourceProperty("socketTimeout", "5000");
         hikariConfig.setMaximumPoolSize(10);
         hikariConfig.setMinimumIdle(2);
         hikariConfig.setConnectionTimeout(5000);
@@ -106,7 +107,7 @@ public class MySQLDatabaseHandler implements DatabaseHandler {
                 }
             }
         } catch (SQLException e) {
-            plugin.getLogger().severe("无法加载玩家数据: " + e.getMessage());
+            throw new IllegalStateException("无法加载玩家数据: " + e.getMessage(), e);
         }
         
         return true;
@@ -129,7 +130,7 @@ public class MySQLDatabaseHandler implements DatabaseHandler {
             
             statement.executeUpdate();
         } catch (SQLException e) {
-            plugin.getLogger().severe("无法保存玩家数据: " + e.getMessage());
+            throw new IllegalStateException("无法保存玩家数据: " + e.getMessage(), e);
         }
     }
     
@@ -157,7 +158,7 @@ public class MySQLDatabaseHandler implements DatabaseHandler {
             statement.executeBatch();
             connection.commit();
         } catch (SQLException e) {
-            plugin.getLogger().severe("无法批量保存玩家数据: " + e.getMessage());
+            throw new IllegalStateException("无法批量保存玩家数据: " + e.getMessage(), e);
         }
     }
     

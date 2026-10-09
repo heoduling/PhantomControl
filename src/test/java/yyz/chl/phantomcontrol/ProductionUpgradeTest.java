@@ -70,7 +70,7 @@ class ProductionUpgradeTest {
                     assertEquals(entry.getValue(), after.get(entry.getKey()), file.getKey() + ":" + entry.getKey());
                 }
             }
-            assertEquals(3, after.get("config-version"));
+            assertEquals(4, after.get("config-version"));
         }
         assertArrayEquals(playerData, Files.readAllBytes(directory.resolve("playerdata.yml")));
         String migrated = Files.readString(directory.resolve("config.yml"));

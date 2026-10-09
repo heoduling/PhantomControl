@@ -1,6 +1,6 @@
 # PhantomControl 消息配置文件
 # 配置文件版本（请勿手动修改，升级插件时会自动更新）
-config-version: 3
+config-version: 4
 
 # 主命令消息
 command:
@@ -23,6 +23,8 @@ reload-command:
 
 # 管理员命令消息
 admin:
+  # 修改被拒绝或保存失败时显示，不能报告成功
+  change-failed: "&c❌ 未能修改玩家 %player% 的设置：操作被取消、玩家离线或数据保存失败。"
   usage: "&c使用方法: /%maincommand% admin <enable|disable|status|batch|server> <参数>"
   player-not-found: "&c找不到玩家 %player%！"
   enable-success: "&a✅ 已成功为玩家 %player% 启用幻翼，幻翼会正常生成！"

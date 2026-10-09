@@ -3,8 +3,6 @@ package yyz.chl.phantomcontrol;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bstats.bukkit.Metrics;
-import org.bstats.charts.MultiLineChart;
 import yyz.chl.phantomcontrol.api.DefaultPhantomControlAPI;
 import yyz.chl.phantomcontrol.api.PhantomControlAPI;
 import yyz.chl.phantomcontrol.command.CommandManager;
@@ -14,8 +12,6 @@ import yyz.chl.phantomcontrol.manager.DatabaseManager;
 import yyz.chl.phantomcontrol.manager.GUIManager;
 import yyz.chl.phantomcontrol.manager.PhantomManager;
 import yyz.chl.phantomcontrol.util.MessageUtil;
-import java.util.HashMap;
-import java.util.Map;
 
 public class PhantomControl extends JavaPlugin {
     public static PhantomControl instance;
@@ -73,18 +69,6 @@ public class PhantomControl extends JavaPlugin {
         startAutoSaveTask();
         
         registerPlaceholderAPI();
-        
-        if (configManager.getBoolean("settings.bstats.enabled", true)) {
-            int pluginId = 29276;
-            Metrics metrics = new Metrics(this, pluginId);
-            
-            metrics.addCustomChart(new MultiLineChart("players_and_servers", () -> {
-                Map<String, Integer> valueMap = new HashMap<>();
-                valueMap.put("servers", 1);
-                valueMap.put("players", Bukkit.getOnlinePlayers().size());
-                return valueMap;
-            }));
-        }
         
         getLogger().info("PhantomControl 已成功加载！作者：CHL_chun");
     }
@@ -165,7 +149,8 @@ public class PhantomControl extends JavaPlugin {
         return guiManager;
     }
     
-    public ReloadResult reloadAll() {
+    /** Blocking compatibility entry point; use reloadAllAsync from commands. */
+    public synchronized ReloadResult reloadAll() {
         ConfigManager.RuntimeConfigSnapshot previousConfig = configManager.snapshotRuntimeConfig();
         boolean databaseReloaded;
 
@@ -183,6 +168,15 @@ public class PhantomControl extends JavaPlugin {
 
         return new ReloadResult(databaseReloaded,
                 !commandManager.isConfiguredCommandRegistrationCurrent());
+    }
+
+    public java.util.concurrent.CompletableFuture<ReloadResult> reloadAllAsync() {
+        java.util.concurrent.CompletableFuture<ReloadResult> result = new java.util.concurrent.CompletableFuture<>();
+        Bukkit.getAsyncScheduler().runNow(this, task -> {
+            try { result.complete(reloadAll()); }
+            catch (RuntimeException error) { result.completeExceptionally(error); }
+        });
+        return result;
     }
 
     private void startAutoSaveTask() {

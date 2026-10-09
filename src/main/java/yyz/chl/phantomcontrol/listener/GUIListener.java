@@ -5,6 +5,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import yyz.chl.phantomcontrol.api.PhantomStatusChangeSource;
 import yyz.chl.phantomcontrol.manager.ConfigManager;
 import yyz.chl.phantomcontrol.manager.GUIManager;
@@ -50,6 +51,14 @@ public class GUIListener implements Listener {
         }
     }
     
+    @EventHandler
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (guiManager.isPhantomControlInventory(event.getView().getTopInventory())
+                && event.getRawSlots().stream().anyMatch(slot -> slot < event.getView().getTopInventory().getSize())) {
+            event.setCancelled(true);
+        }
+    }
+
     private void enablePlayer(Player player) {
         if (!phantomManager.enablePhantoms(player, PhantomStatusChangeSource.GUI)) {
             return;

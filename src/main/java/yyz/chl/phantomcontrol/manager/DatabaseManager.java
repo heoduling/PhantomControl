@@ -5,378 +5,271 @@ import yyz.chl.phantomcontrol.PhantomControl;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
 
 public class DatabaseManager {
-
-    private static class CacheEntry {
-        private final boolean value;
-        private volatile long timestamp;
-
-        private CacheEntry(boolean value) {
-            this.value = value;
-            this.timestamp = System.currentTimeMillis();
-        }
-    }
+    private record CacheEntry(boolean value) {}
 
     private DatabaseHandler databaseHandler;
-    private final ConcurrentHashMap<UUID, CacheEntry> playerDataCache;
-    private final Set<UUID> activePlayerIds;
-    private final Set<UUID> loadingPlayerIds;
+    private final Map<UUID, CacheEntry> playerDataCache = new ConcurrentHashMap<>();
+    // Failed writes, including departed players, remain available for the next flush.
+    private final Map<UUID, CacheEntry> pendingWrites = new HashMap<>();
+    private final Map<UUID, CompletableFuture<Boolean>> loadingPlayers = new HashMap<>();
+    private final java.util.Set<UUID> activePlayers = new java.util.HashSet<>();
+    private final Object stateLock = new Object();
     private final ConfigManager configManager;
     private final PhantomControl plugin;
-    private final ScheduledExecutorService cleanupExecutor;
-    private final ExecutorService databaseExecutor;
-    private final Object databaseIoLock = new Object();
-    private volatile DatabaseSettings activeDatabaseSettings;
+    private final ExecutorService databaseExecutor = new ThreadPoolExecutor(1, 1, 0L,
+            TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(4096), runnable -> {
+                Thread thread = new Thread(runnable, "PhantomControl-storage");
+                thread.setDaemon(true);
+                return thread;
+            }) {
+        @Override protected void terminated() {
+            if (!closed) return;
+            try {
+                Map<UUID, CacheEntry> finalData;
+                synchronized (stateLock) { finalData = snapshot(); }
+                flush(finalData);
+            } catch (RuntimeException error) {
+                plugin.getLogger().log(java.util.logging.Level.SEVERE, "停服保存失败", error);
+            } finally {
+                try { databaseHandler.closeConnection(); }
+                catch (RuntimeException error) {
+                    plugin.getLogger().log(java.util.logging.Level.SEVERE, "关闭数据库失败", error);
+                }
+            }
+        }
+    };
+    private DatabaseSettings activeDatabaseSettings;
+    private boolean closed;
 
     public DatabaseManager(PhantomControl plugin, ConfigManager configManager) {
         this.plugin = plugin;
         this.configManager = configManager;
-        this.playerDataCache = new ConcurrentHashMap<>();
-        this.activePlayerIds = ConcurrentHashMap.newKeySet();
-        this.loadingPlayerIds = ConcurrentHashMap.newKeySet();
-        this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor();
-        this.databaseExecutor = Executors.newSingleThreadExecutor();
-        initializeDatabase();
-        startCacheCleanup();
-    }
-
-    private void initializeDatabase() {
-        DatabaseSettings settings = DatabaseSettings.from(configManager);
-        DatabaseHandler handler = createDatabaseHandler(settings);
+        activeDatabaseSettings = DatabaseSettings.from(configManager);
+        databaseHandler = createDatabaseHandler(activeDatabaseSettings);
         try {
-            handler.connect();
-            handler.initialize();
-            this.databaseHandler = handler;
-            this.activeDatabaseSettings = settings;
-        } catch (RuntimeException e) {
-            handler.closeConnection();
-            throw e;
+            databaseHandler.connect();
+            databaseHandler.initialize();
+        } catch (RuntimeException error) {
+            databaseExecutor.shutdown();
+            databaseHandler.closeConnection();
+            throw error;
         }
     }
 
     private DatabaseHandler createDatabaseHandler(DatabaseSettings settings) {
-        if (settings.type().equals("mysql")) {
-            return new MySQLDatabaseHandler(plugin, configManager);
-        }
-        return new FlatFileDatabaseHandler(plugin);
+        return settings.type().equals("mysql")
+                ? new MySQLDatabaseHandler(plugin, configManager) : new FlatFileDatabaseHandler(plugin);
     }
 
-    private void startCacheCleanup() {
-        cleanupExecutor.scheduleAtFixedRate(() -> {
-            long now = System.currentTimeMillis();
-            long timeout = configManager.getLong("database.cache-timeout-minutes", 60) * 60 * 1000L;
-
-            playerDataCache.entrySet().removeIf(entry -> {
-                UUID playerId = entry.getKey();
-                if (activePlayerIds.contains(playerId)) {
-                    entry.getValue().timestamp = now;
-                    return false;
-                }
-
-                if (now - entry.getValue().timestamp > timeout) {
-                    queueSave(playerId, entry.getValue().value, null);
-                    return true;
-                }
-                return false;
+    // Only state changes and queue submission take this lock. Never hold it across I/O or waits.
+    private <T> CompletableFuture<T> submit(Supplier<T> operation) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        if (closed) return CompletableFuture.failedFuture(new IllegalStateException("数据库已关闭"));
+        try {
+            databaseExecutor.execute(() -> {
+                try { result.complete(operation.get()); }
+                catch (RuntimeException error) { result.completeExceptionally(error); }
             });
-        }, 1, 1, TimeUnit.HOURS);
-    }
-
-    public boolean reloadDatabase() {
-        DatabaseSettings requestedSettings = DatabaseSettings.from(configManager);
-        if (requestedSettings.equals(activeDatabaseSettings)) {
-            return false;
-        }
-
-        synchronized (databaseIoLock) {
-            waitForPendingDatabaseTasksLocked();
-            saveAllData();
-
-            DatabaseHandler replacement = createDatabaseHandler(requestedSettings);
-            try {
-                replacement.connect();
-                replacement.initialize();
-            } catch (RuntimeException e) {
-                replacement.closeConnection();
-                throw e;
-            }
-
-            DatabaseHandler previous = databaseHandler;
-            databaseHandler = replacement;
-            activeDatabaseSettings = requestedSettings;
-            previous.closeConnection();
-            saveAllData();
-            return true;
-        }
-    }
-
-    public CompletableFuture<Boolean> loadPlayerData(Player player) {
-        UUID playerId = player.getUniqueId();
-        String playerName = player.getName();
-        activePlayerIds.add(playerId);
-
-        CacheEntry existingEntry = playerDataCache.get(playerId);
-        if (existingEntry != null) {
-            existingEntry.timestamp = System.currentTimeMillis();
-            return CompletableFuture.completedFuture(existingEntry.value);
-        }
-
-        loadingPlayerIds.add(playerId);
-        CompletableFuture<Boolean> result = new CompletableFuture<>();
-        synchronized (databaseIoLock) {
-            try {
-                databaseExecutor.submit(() -> {
-                    try {
-                        boolean phantomsEnabled = databaseHandler.loadPlayerData(playerId);
-                        if (activePlayerIds.contains(playerId)) {
-                            playerDataCache.putIfAbsent(playerId, new CacheEntry(phantomsEnabled));
-                            CacheEntry cachedEntry = playerDataCache.get(playerId);
-                            if (cachedEntry != null) {
-                                cachedEntry.timestamp = System.currentTimeMillis();
-                            }
-                        }
-
-                        if (configManager.isDebugEnabled()) {
-                            plugin.getLogger().info("已异步加载玩家数据: " + playerName + " (" + playerId + "), 幻翼: "
-                                    + (phantomsEnabled ? "启用" : "禁用"));
-                        }
-
-                        result.complete(phantomsEnabled);
-                    } catch (RuntimeException e) {
-                        result.completeExceptionally(e);
-                    } finally {
-                        loadingPlayerIds.remove(playerId);
-                    }
-                });
-            } catch (RejectedExecutionException e) {
-                loadingPlayerIds.remove(playerId);
-                result.completeExceptionally(e);
-            }
+        } catch (RejectedExecutionException error) {
+            result.completeExceptionally(error);
         }
         return result;
     }
 
-    public void savePlayerData(Player player) {
-        UUID playerId = player.getUniqueId();
-        String playerName = player.getName();
-        activePlayerIds.remove(playerId);
-        loadingPlayerIds.remove(playerId);
+    public CompletableFuture<Boolean> loadPlayerData(Player player) {
+        UUID id = player.getUniqueId();
+        synchronized (stateLock) {
+            activePlayers.add(id);
+            CacheEntry cached = playerDataCache.get(id);
+            if (cached != null) return CompletableFuture.completedFuture(cached.value());
+            CompletableFuture<Boolean> existing = loadingPlayers.get(id);
+            if (existing != null) return existing;
+            CompletableFuture<Boolean> load = new CompletableFuture<>();
+            loadingPlayers.put(id, load);
+            submit(() -> databaseHandler.loadPlayerData(id)).whenComplete((value, error) -> {
+                synchronized (stateLock) {
+                    if (loadingPlayers.remove(id, load) && error == null) {
+                        playerDataCache.putIfAbsent(id, new CacheEntry(value));
+                    }
+                }
+                if (error != null) load.completeExceptionally(error);
+                else load.complete(getPlayerPhantomsStatus(id));
+            });
+            return load;
+        }
+    }
 
-        CacheEntry entry = playerDataCache.remove(playerId);
-        if (entry != null) {
-            queueSave(playerId, entry.value, "已保存玩家数据: " + playerName + " (" + playerId + ")");
+    public void savePlayerData(Player player) {
+        synchronized (stateLock) {
+            UUID id = player.getUniqueId();
+            activePlayers.remove(id);
+            loadingPlayers.remove(id);
+            playerDataCache.remove(id);
+            // All changes were already queued. Do not enqueue an older quit snapshot.
+        }
+    }
+
+    public boolean isPlayerDataLoaded(UUID id) {
+        return playerDataCache.containsKey(id);
+    }
+
+    /** Cached lookup only; joining members are protected until their preference loads. */
+    public boolean getPlayerPhantomsStatus(UUID id) {
+        synchronized (stateLock) {
+            CacheEntry cached = playerDataCache.get(id);
+            if (cached != null) return cached.value();
+            CacheEntry pending = pendingWrites.get(id);
+            if (pending != null) return pending.value();
+            return !loadingPlayers.containsKey(id);
+        }
+    }
+
+    public CompletableFuture<Boolean> getPlayerPhantomsStatusAsync(UUID id) {
+        synchronized (stateLock) {
+            CacheEntry cached = playerDataCache.get(id);
+            if (cached != null) return CompletableFuture.completedFuture(cached.value());
+            CompletableFuture<Boolean> loading = loadingPlayers.get(id);
+            if (loading != null) return loading;
+            return submit(() -> databaseHandler.loadPlayerData(id));
+        }
+    }
+
+    public CompletableFuture<Boolean> setPlayerPhantomsStatusAsync(UUID id, boolean enabled) {
+        synchronized (stateLock) {
+            if (closed) return CompletableFuture.failedFuture(new IllegalStateException("数据库已关闭"));
+            CacheEntry entry = new CacheEntry(enabled);
+            // Publish intent before an in-flight load can install its older result.
+            playerDataCache.put(id, entry);
+            pendingWrites.put(id, entry);
+            CompletableFuture<Boolean> result = submit(() -> {
+                databaseHandler.savePlayerData(id, enabled);
+                synchronized (stateLock) {
+                    if (pendingWrites.get(id) == entry) pendingWrites.remove(id);
+                    if (!activePlayers.contains(id) && playerDataCache.get(id) == entry) playerDataCache.remove(id);
+                }
+                return true;
+            });
+            logFailure(result);
+            return result;
+        }
+    }
+
+    public void setPlayerPhantomsStatus(UUID id, boolean enabled) {
+        setPlayerPhantomsStatusAsync(id, enabled);
+    }
+
+    /** Blocking compatibility methods: callers must use an I/O thread. Commands use the async API. */
+    @Deprecated
+    public boolean getPlayerPhantomsStatusDirect(UUID id) {
+        return getPlayerPhantomsStatusAsync(id).join();
+    }
+
+    @Deprecated
+    public void setPlayerPhantomsStatusDirect(UUID id, boolean enabled) {
+        setPlayerPhantomsStatusAsync(id, enabled).join();
+    }
+
+    private Map<UUID, CacheEntry> snapshot() {
+        Map<UUID, CacheEntry> snapshot = new HashMap<>(playerDataCache);
+        snapshot.putAll(pendingWrites);
+        return snapshot;
+    }
+
+    private void flush(Map<UUID, CacheEntry> snapshot) {
+        Map<UUID, Boolean> values = new HashMap<>();
+        snapshot.forEach((id, entry) -> values.put(id, entry.value()));
+        databaseHandler.saveAllData(values);
+        synchronized (stateLock) {
+            snapshot.forEach((id, entry) -> {
+                if (pendingWrites.get(id) == entry) pendingWrites.remove(id);
+                if (!activePlayers.contains(id) && playerDataCache.get(id) == entry) playerDataCache.remove(id);
+            });
+        }
+    }
+
+    public CompletableFuture<Void> saveAllDataAsync() {
+        synchronized (stateLock) {
+            // Snapshot creation AND enqueue are ordered with single-player changes.
+            Map<UUID, CacheEntry> snapshot = snapshot();
+            CompletableFuture<Void> result = submit(() -> { flush(snapshot); return null; });
+            logFailure(result);
+            return result;
         }
     }
 
     public void saveAllData() {
-        Map<UUID, Boolean> playerDataMap = new HashMap<>();
-        for (Map.Entry<UUID, CacheEntry> entry : playerDataCache.entrySet()) {
-            playerDataMap.put(entry.getKey(), entry.getValue().value);
-        }
-
-        synchronized (databaseIoLock) {
-            databaseHandler.saveAllData(playerDataMap);
-        }
+        saveAllDataAsync();
     }
 
-    /**
-     * Returns the cached status for online logic. This method never performs database I/O.
-     */
-    public boolean getPlayerPhantomsStatus(UUID playerId) {
-        CacheEntry entry = playerDataCache.get(playerId);
-        if (entry != null) {
-            entry.timestamp = System.currentTimeMillis();
-            return entry.value;
-        }
-        if (loadingPlayerIds.contains(playerId)) {
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * Directly reads a player status from storage. Intended for offline admin queries.
-     */
-    public boolean getPlayerPhantomsStatusDirect(UUID playerId) {
-        CacheEntry entry = playerDataCache.get(playerId);
-        if (entry != null) {
-            return entry.value;
-        }
-        synchronized (databaseIoLock) {
-            waitForPendingDatabaseTasksLocked();
-            return databaseHandler.loadPlayerData(playerId);
-        }
-    }
-
-    public CompletableFuture<Boolean> getPlayerPhantomsStatusAsync(UUID playerId) {
-        CacheEntry entry = playerDataCache.get(playerId);
-        if (entry != null) {
-            entry.timestamp = System.currentTimeMillis();
-            return CompletableFuture.completedFuture(entry.value);
-        }
-
-        CompletableFuture<Boolean> result = new CompletableFuture<>();
-        synchronized (databaseIoLock) {
-            try {
-                databaseExecutor.submit(() -> {
-                    try {
-                        result.complete(databaseHandler.loadPlayerData(playerId));
-                    } catch (RuntimeException e) {
-                        result.completeExceptionally(e);
-                    }
-                });
-            } catch (RejectedExecutionException e) {
-                result.completeExceptionally(e);
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Directly writes storage and updates cache. Intended for offline admin operations.
-     */
-    public void setPlayerPhantomsStatusDirect(UUID playerId, boolean enabled) {
-        playerDataCache.put(playerId, new CacheEntry(enabled));
-        synchronized (databaseIoLock) {
-            waitForPendingDatabaseTasksLocked();
-            databaseHandler.savePlayerData(playerId, enabled);
-        }
-    }
-
-    public CompletableFuture<Boolean> setPlayerPhantomsStatusAsync(UUID playerId, boolean enabled) {
-        playerDataCache.put(playerId, new CacheEntry(enabled));
-        loadingPlayerIds.remove(playerId);
-
-        CompletableFuture<Boolean> result = new CompletableFuture<>();
-        Runnable saveTask = () -> {
-            try {
-                databaseHandler.savePlayerData(playerId, enabled);
-                result.complete(true);
-            } catch (RuntimeException e) {
-                result.completeExceptionally(e);
-            }
-        };
-
-        synchronized (databaseIoLock) {
-            try {
-                databaseExecutor.submit(saveTask);
-            } catch (RejectedExecutionException e) {
-                saveTask.run();
-            }
-        }
-        return result;
-    }
-
-    public void setPlayerPhantomsStatus(UUID playerId, boolean enabled) {
-        playerDataCache.compute(playerId, (key, currentEntry) -> {
-            boolean currentStatus = currentEntry != null ? currentEntry.value : true;
-            if (currentStatus == enabled) {
-                CacheEntry entry = currentEntry != null ? currentEntry : new CacheEntry(enabled);
-                entry.timestamp = System.currentTimeMillis();
-                return entry;
-            }
-
-            CacheEntry newEntry = new CacheEntry(enabled);
-            queueSave(playerId, enabled, null);
-            return newEntry;
+    private void logFailure(CompletableFuture<?> result) {
+        result.whenComplete((ignored, error) -> {
+            if (error != null) plugin.getLogger().log(java.util.logging.Level.SEVERE,
+                    "数据库操作失败；未保存的设置保留待重试", error);
         });
     }
 
-    private void queueSave(UUID playerId, boolean phantomsEnabled, String debugMessage) {
-        Runnable saveTask = () -> {
-            try {
-                databaseHandler.savePlayerData(playerId, phantomsEnabled);
-                if (debugMessage != null && configManager.isDebugEnabled()) {
-                    plugin.getLogger().info(debugMessage);
+    /** Called on the asynchronous reload thread, never a player tick. */
+    public boolean reloadDatabase() {
+        CompletableFuture<Boolean> result;
+        synchronized (stateLock) {
+            DatabaseSettings requested = DatabaseSettings.from(configManager);
+            result = submit(() -> {
+                if (requested.equals(activeDatabaseSettings)) return false;
+                Map<UUID, CacheEntry> snapshot;
+                synchronized (stateLock) { snapshot = snapshot(); }
+                flush(snapshot);
+                DatabaseHandler replacement = createDatabaseHandler(requested);
+                try {
+                    replacement.connect();
+                    replacement.initialize();
+                    Map<UUID, Boolean> values = new HashMap<>();
+                    snapshot.forEach((id, entry) -> values.put(id, entry.value()));
+                    replacement.saveAllData(values);
+                } catch (RuntimeException error) {
+                    replacement.closeConnection();
+                    throw error;
                 }
-            } catch (RuntimeException e) {
-                plugin.getLogger().severe("保存玩家数据失败: " + playerId + " - " + e.getMessage());
-            }
-        };
-
-        synchronized (databaseIoLock) {
-            try {
-                databaseExecutor.submit(saveTask);
-            } catch (RejectedExecutionException e) {
-                saveTask.run();
-            }
-        }
-    }
-
-    private void waitForPendingDatabaseTasksLocked() {
-        try {
-            Future<?> marker = databaseExecutor.submit(() -> {
+                DatabaseHandler previous = databaseHandler;
+                previous.closeConnection();
+                databaseHandler = replacement;
+                activeDatabaseSettings = requested;
+                return true;
             });
-            marker.get(10, TimeUnit.SECONDS);
-        } catch (RejectedExecutionException ignored) {
-        } catch (TimeoutException e) {
-            plugin.getLogger().warning("等待数据库任务队列完成超时");
-        } catch (InterruptedException e) {
-            plugin.getLogger().warning("等待数据库任务队列完成时被中断: " + e.getMessage());
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException e) {
-            plugin.getLogger().warning("等待数据库任务队列完成时发生错误: " + e.getMessage());
         }
-    }
-
-    private void shutdownDatabaseExecutorLocked() {
-        databaseExecutor.shutdown();
-        try {
-            if (!databaseExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                plugin.getLogger().warning("数据库任务线程池未能在10秒内关闭");
-            }
-        } catch (InterruptedException e) {
-            plugin.getLogger().warning("等待数据库任务线程池关闭时被中断: " + e.getMessage());
-            Thread.currentThread().interrupt();
-        }
+        return result.join();
     }
 
     public void closeConnection() {
-        cleanupExecutor.shutdownNow();
-        try {
-            if (!cleanupExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                plugin.getLogger().warning("缓存清理线程池未能在5秒内关闭");
-            }
-        } catch (InterruptedException e) {
-            plugin.getLogger().warning("关闭缓存清理线程池时被中断: " + e.getMessage());
-            Thread.currentThread().interrupt();
+        synchronized (stateLock) {
+            if (closed) return;
+            closed = true;
         }
-
-        synchronized (databaseIoLock) {
-            waitForPendingDatabaseTasksLocked();
-            saveAllData();
-            shutdownDatabaseExecutorLocked();
-            databaseHandler.closeConnection();
+        // shutdown may invoke terminated immediately when idle; keep I/O outside stateLock.
+        databaseExecutor.shutdown();
+        try {
+            // Only server shutdown waits for storage. Normal gameplay never waits.
+            if (!databaseExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                plugin.getLogger().severe("数据库关闭超时，未关闭仍在使用的连接；请检查数据库连接");
+                return;
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            plugin.getLogger().severe("等待数据保存时被中断");
         }
     }
 
     private record DatabaseSettings(String type, String address, String database, String username,
                                     String password, String prefix) {
-        private static DatabaseSettings from(ConfigManager configManager) {
-            String type = configManager.getDatabaseType();
-            if (!type.equals("mysql")) {
-                return new DatabaseSettings(type, null, null, null, null, null);
-            }
-            return new DatabaseSettings(
-                    type,
-                    configManager.getMySQLAddress(),
-                    configManager.getMySQLDatabase(),
-                    configManager.getMySQLUsername(),
-                    configManager.getMySQLPassword(),
-                    configManager.getMySQLPrefix());
+        private static DatabaseSettings from(ConfigManager config) {
+            String type = config.getDatabaseType();
+            if (!type.equals("mysql")) return new DatabaseSettings(type, null, null, null, null, null);
+            return new DatabaseSettings(type, config.getMySQLAddress(), config.getMySQLDatabase(),
+                    config.getMySQLUsername(), config.getMySQLPassword(), config.getMySQLPrefix());
         }
     }
 }
