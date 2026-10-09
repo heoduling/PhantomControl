@@ -35,6 +35,8 @@ class AuditFixRegressionTest {
         PhantomControl p = mock(PhantomControl.class);
         when(p.getDataFolder()).thenReturn(dir.toFile());
         when(p.getLogger()).thenReturn(Logger.getLogger("audit-regression"));
+        when(p.isEnabled()).thenReturn(true);
+        when(p.getLifecycle()).thenReturn(new yyz.chl.phantomcontrol.util.PluginLifecycle(p));
         when(p.getResource(anyString())).thenAnswer(i -> getClass().getResourceAsStream("/" + i.getArgument(0)));
         return p;
     }

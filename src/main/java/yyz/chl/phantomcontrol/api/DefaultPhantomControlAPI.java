@@ -48,8 +48,8 @@ public final class DefaultPhantomControlAPI implements PhantomControlAPI {
         Objects.requireNonNull(playerId, "playerId");
         Player onlinePlayer = Bukkit.getPlayer(playerId);
         if (onlinePlayer != null) {
-            return CompletableFuture.completedFuture(
-                phantomManager.setPhantomsEnabled(onlinePlayer, enabled, PhantomStatusChangeSource.API));
+            return phantomManager.getLifecycle().entity(onlinePlayer,
+                    () -> phantomManager.setPhantomsEnabled(onlinePlayer, enabled, PhantomStatusChangeSource.API));
         }
         return databaseManager.setPlayerPhantomsStatusAsync(playerId, enabled);
     }

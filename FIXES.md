@@ -1,8 +1,40 @@
-# PhantomControl 2.1.1-2 修复与验证
+# PhantomControl 2.1.1-3 修复与验证
 
 基于作者 2.1.1（上游 ba3e27b25f3857d624ac12b1a7979956424f1d96），包含 2.1.1-1 的容器快照与权限修复。
 
-## 这次修改
+## 2.1.1-3 热加载行为
+
+目标组合是服主提供的 Shiroha 26.2 核心与 PlugManX 3.1.0-Beta.2（SHA256 `15A978FAAF3CD48166743AA67D31132C566844B8C583CDB7CBB526932ABE429C`）。无需修改 PlugManX JAR。以下命令在安装本版后使用，玩家执行需要原有 PlugManX 对应权限：
+
+| 操作 | 命令 |
+| --- | --- |
+| 重载插件 | `/plugman reload PhantomControl` |
+| 卸载插件 | `/plugman unload PhantomControl` |
+| 加载插件 | `/plugman load PhantomControl`（文件名使用 `PhantomControl.jar`） |
+| 禁用 / 启用 | `/plugman disable PhantomControl`、`/plugman enable PhantomControl` |
+| 停用再启用 | `/plugman restart PhantomControl` |
+
+`/plm` 和 PlugManX 命名空间命令也会进入同一清理流程。玩家输入、控制台输入接入预清理；RCON 事件也有对应处理，但未做 RCON 客户端实测。单纯修改配置仍用 `/pcr`。
+
+清理先停止新业务操作和自动保存定时器，等待本轮已提交回调结束；随后分别在各玩家所属 EntityScheduler 关闭仍属于本插件的原窗口，保留鼠标上的真实物品。异步保存并关闭存储后，在全局线程注销自己的命令和帮助条目，再把准确的单插件操作交给 PlugManX。插件停用时注销 PAPI 扩展、GentleUnload 注册、API 服务、监听器、调度任务并清空会话和已成功保存的缓存；热启用会主动加载已在线玩家的设置。
+
+清理失败或 20 秒超时会拒绝继续卸载并停止接收新业务，控制台记录原因。存储保存失败且数据库尚未关闭时，修好存储后可重试同一命令；超时或关闭阶段失败时应正常重启恢复，不能假装卸载成功。`disable` 按 PlugManX 定义保留插件实例供 `enable` 使用；`unload` / `reload` 才检查旧实例、旧类加载器释放。
+
+两个实测兼容处理：核心 `PluginClassLoader.pluginState` 保存加载调用栈，因此重载必须在没有旧插件回调栈的下一次 PlugManX 全局调度中执行；Beta.2 的 `FieldAccessor.fieldCache` 会保存动态命令类的 Field，卸载其他插件也能产生这个引用。因此预先移除自己的命令，并按类加载器身份清理缓存中仅属于本插件的条目。命令帮助的根条目及索引也按实际持有的命令对象清理，不清空整个服务器帮助表。
+
+支持范围是上述明确指定 PhantomControl 的操作。`all` / `*` 批量停用、卸载、重载会被拒绝，需单独指定插件。第三方插件直接调用 Bukkit `disablePlugin`、强制移除、绕过预清理的通用热更新工具不在此保证内。PlugManX API 的卸载保护在未完成预清理时返回拒绝。首次安装需要完整重启，是因为原版和旧修复版没有本版的预清理逻辑，不能追溯清理已经产生的旧引用。
+
+### 本版验证
+
+最终 Maven `clean verify` 共 25 项测试通过，包含任务取消后仍等待实际回调结束、退休/拒绝终态、停止接单后的清理、保存失败拒绝卸载并重试，以及不支持 Iterator.remove 的命令表与其他插件覆盖别名保护。真实旧配置 ZIP 的 12002 条记录升级核对通过。正式 JAR 另经结构/Folia/CRC 校验，未打包测试探针和 bStats。
+
+真实客户端在主世界/下界两个不同区域保持在线，核心 ownership 检查确认分属不同区域。文件存储模式已通过首次冷启动卸载、在线加载、5 轮连续重载，以及 disable/enable 和 restart：两侧菜单关闭且各自准备的 8 个鼠标钻石保留，没有拿出菜单装饰；已保存的关闭设置及 PAPI 返回值恢复。启用稳定值为 12 个命令映射、12 个监听器注册、1 个 API 服务、1 个存储线程、1 个 GentleUnload 钩子、1 个扩展、1 个自动保存任务；停用/卸载均归零。卸载和重载的旧实例及类加载器用独立探针的 WeakReference 配合 GC 检查，GC 仅用于隔离测试，不加到 PhantomControl 的生产逻辑中。
+
+内存结论区分“仍被插件强引用”和“JVM 允许暂存”。MySQL 配置比较触发的 Java record `DatabaseSettings.equals` 在 JDK 25 的 `ObjectMethods.OBJECT_EQ → MethodHandle.asTypeSoftCache` 留有软引用；堆分析排除软引用时没有到 GC root 的路径，包含软引用时定位到该缓存。本版没有修改 JVM 私有缓存，也不承诺卸载命令返回瞬间就回收全部类。MySQL 类加载器回收测试另使用 `-XX:SoftRefLRUPolicyMSPerMB=0` 加外部 `jcmd GC.run`，以便主动释放这类软缓存；生产不要求添加该参数。核心共享 MySQL 驱动的清理线程归核心所有，插件仅释放自己的连接池和连接，不强停共享驱动。
+
+本地 MySQL 8.4.11 实测：删表制造保存失败，卸载被拒绝且保持停止接单；重建测试表后重试成功，连接池线程为 0，数据库中本插件测试账号的连接数为 0。热加载后设置恢复，连续 2 轮 MySQL 重载、一次 disable/enable 均通过；旧实例/类加载器可回收，核心公共 MySQL 清理线程始终 1 条。无 PlugManX 权限的普通测试玩家不能发起清理，`unload all` 被拒绝。首次冷启动、5 轮文件存储重载和这组 MySQL 测试使用相同的最终 JAR：SHA256 `3B5EA205EB47730DB0F0D9FB5AC9EA9ACFE5D79EE15ED797F82A77FF0476BEEB`。
+
+## 2.1.1-2 保留的修复
 
 - 删除 bStats 初始化、图表、依赖和打包逻辑；默认配置不再生成统计设置。旧配置里的 `settings.bstats` 无调用者，保留也不会上报。
 - `GUIListener.onInventoryDrag` 拦截拖动进入菜单顶部，防止鼠标上的实际物品留在临时菜单中；普通容器及只涉及玩家背包的拖动不受此拦截影响。
@@ -43,8 +75,8 @@ mvn -B -ntp clean verify '-Dphantomcontrol.upgradeZip=绝对路径/旧配置.zip
 
 权限默认值沿用原版 `phantomcontrol.use: default: true`。仅给会员 true 不能证明普通玩家被拒绝；会员专用必须在实际权限插件中确认普通组 false、会员组 true。本次没有修改权限组。
 
-正式安装：正常停服，备份旧 JAR 与整个 `plugins/PhantomControl`，移出旧 JAR，仅放一个修复版，保留原数据目录再启动。新键和消息自动补齐。回滚时停服，还原配套 JAR/目录备份。不要用热卸载替代完整重启。
+正式安装：正常停服，备份旧 JAR 与整个 `plugins/PhantomControl`，移出旧 JAR，仅放一个修复版，保留原数据目录再启动。新键和消息自动补齐。回滚时停服，还原配套 JAR/目录备份。首次从原版或 2.1.1-2 升级必须完整重启一次；安装本版后可使用下面的受控热加载流程。
 
 生产配置仍为 flatfile、300 秒自动保存；单条修改先进入内存，周期保存和正常停服落盘。强制杀进程/系统断电后，不能保证保留上次写盘以后的修改。同步兼容入口（数据库 Direct 方法及 reloadAll）保留给已有调用方，外部插件必须在 I/O 线程使用；本插件命令使用异步入口。
 
-本次没有生产部署，没有复现生产告警中的原始物品 NBT，也不能将整段 5.34 秒告警全部归因于一次快照。PAPI 联动和长期满载压力未做现场验证。
+本次没有生产部署，没有复现生产告警中的原始物品 NBT，也不能将整段 5.34 秒告警全部归因于一次快照。PAPI 联动见本版热加载验证；长期满载压力未做现场验证。

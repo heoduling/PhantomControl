@@ -19,7 +19,7 @@ public class ListenerManager {
     
     private void registerListeners(PhantomControl plugin, DatabaseManager databaseManager, PhantomManager phantomManager,
                                    GUIManager guiManager, ConfigManager configManager, MessageUtil messageUtil) {
-        registerListener(plugin, new PlayerJoinListener(databaseManager, phantomManager));
+        registerListener(plugin, new PlayerJoinListener(plugin));
         registerListener(plugin, new PlayerQuitListener(databaseManager));
         registerListener(plugin, new GUIListener(guiManager, phantomManager, configManager, messageUtil));
         registerListener(plugin, new PlayerWorldChangeListener(phantomManager));

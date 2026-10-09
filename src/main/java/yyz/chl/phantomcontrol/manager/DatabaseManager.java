@@ -34,17 +34,25 @@ public class DatabaseManager {
                 synchronized (stateLock) { finalData = snapshot(); }
                 flush(finalData);
             } catch (RuntimeException error) {
+                closeFailure = error;
                 plugin.getLogger().log(java.util.logging.Level.SEVERE, "停服保存失败", error);
             } finally {
                 try { databaseHandler.closeConnection(); }
                 catch (RuntimeException error) {
+                    closeFailure = error;
                     plugin.getLogger().log(java.util.logging.Level.SEVERE, "关闭数据库失败", error);
+                }
+                synchronized (stateLock) {
+                    if (closeFailure == null) {
+                        playerDataCache.clear(); pendingWrites.clear(); loadingPlayers.clear(); activePlayers.clear();
+                    }
                 }
             }
         }
     };
     private DatabaseSettings activeDatabaseSettings;
     private boolean closed;
+    private volatile Throwable closeFailure;
 
     public DatabaseManager(PhantomControl plugin, ConfigManager configManager) {
         this.plugin = plugin;
@@ -84,6 +92,7 @@ public class DatabaseManager {
     public CompletableFuture<Boolean> loadPlayerData(Player player) {
         UUID id = player.getUniqueId();
         synchronized (stateLock) {
+            if (closed) return CompletableFuture.failedFuture(new IllegalStateException("数据库已关闭"));
             activePlayers.add(id);
             CacheEntry cached = playerDataCache.get(id);
             if (cached != null) return CompletableFuture.completedFuture(cached.value());
@@ -261,6 +270,11 @@ public class DatabaseManager {
             Thread.currentThread().interrupt();
             plugin.getLogger().severe("等待数据保存时被中断");
         }
+    }
+
+    public void verifyClosed() {
+        if (!databaseExecutor.isTerminated()) throw new IllegalStateException("数据库线程尚未退出");
+        if (closeFailure != null) throw new IllegalStateException("关闭前保存失败", closeFailure);
     }
 
     private record DatabaseSettings(String type, String address, String database, String username,

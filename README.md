@@ -1,4 +1,4 @@
-> 此分支修复版：**2.1.1-2**。已移除 bStats；完整变更和隔离服测试见 [FIXES.md](FIXES.md)。
+> 此分支修复版：**2.1.1-3**。已移除 bStats，支持指定版本 PlugManX 的受控热加载；完整变更和隔离服测试见 [FIXES.md](FIXES.md)。
 
 # PhantomControl 插件文档
 

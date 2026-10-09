@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class GUIManager {
+    private final yyz.chl.phantomcontrol.util.PluginLifecycle lifecycle;
     
     public static final int GUI_SIZE = 27;
     public static final int SLOT_ENABLE = 11;
@@ -39,6 +40,11 @@ public class GUIManager {
     private ItemStack borderItemStack;
 
     public GUIManager(PhantomManager phantomManager, ConfigManager configManager) {
+        this(null, phantomManager, configManager);
+    }
+
+    public GUIManager(yyz.chl.phantomcontrol.PhantomControl plugin, PhantomManager phantomManager, ConfigManager configManager) {
+        this.lifecycle = plugin == null ? null : plugin.getLifecycle();
         this.phantomManager = phantomManager;
         this.configManager = configManager;
         refreshGUIConfig();
@@ -75,6 +81,12 @@ public class GUIManager {
     }
     
     public void openPhantomControlGUI(Player player) {
+        if (lifecycle != null) {
+            lifecycle.callIfRunning(() -> { openMenu(player); return true; }, false);
+        } else openMenu(player);
+    }
+
+    private void openMenu(Player player) {
         String guiTitle = configManager.getMessage(player, "gui.title", "幻翼控制");
         Inventory inventory = Bukkit.createInventory(new GUIHolder(), GUI_SIZE, guiTitle);
         
@@ -100,6 +112,28 @@ public class GUIManager {
     public void handleInventoryClose(Player player) {
         openInventories.remove(player.getUniqueId());
     }
+
+    public java.util.concurrent.CompletableFuture<Void> closeMenus() {
+        java.util.List<java.util.concurrent.CompletableFuture<?>> closes = new java.util.ArrayList<>();
+        for (var entry : Map.copyOf(openInventories).entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null) { openInventories.remove(entry.getKey(), entry.getValue()); continue; }
+            closes.add(lifecycle.entity(player, () -> {
+                if (player.getOpenInventory().getTopInventory() == entry.getValue()) player.closeInventory();
+                openInventories.remove(entry.getKey(), entry.getValue());
+                return null;
+            }, true).handle((ignored, error) -> {
+                // A retired player's container no longer has an active viewer. Do not touch the entity here.
+                if (error instanceof yyz.chl.phantomcontrol.util.PluginLifecycle.EntityRetiredException) {
+                    openInventories.remove(entry.getKey(), entry.getValue());
+                } else if (error != null) throw new java.util.concurrent.CompletionException(error);
+                return null;
+            }));
+        }
+        return java.util.concurrent.CompletableFuture.allOf(closes.toArray(java.util.concurrent.CompletableFuture[]::new));
+    }
+
+    public void clearSessions() { openInventories.clear(); }
     
     private void fillBorder(Inventory inventory) {
         for (int slot : BORDER_TOP) {

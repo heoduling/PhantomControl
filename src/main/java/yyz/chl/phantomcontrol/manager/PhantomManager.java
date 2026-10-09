@@ -15,6 +15,7 @@ public class PhantomManager {
     private final DatabaseManager databaseManager;
     private final ConfigManager configManager;
     private final PhantomControl plugin;
+    private final yyz.chl.phantomcontrol.util.PluginLifecycle lifecycle;
 
     private volatile boolean worldWhitelistEnabled;
     private volatile boolean worldBlacklistEnabled;
@@ -23,10 +24,14 @@ public class PhantomManager {
 
     public PhantomManager(PhantomControl plugin, DatabaseManager databaseManager, ConfigManager configManager) {
         this.plugin = plugin;
+        this.lifecycle = plugin.getLifecycle();
         this.databaseManager = databaseManager;
         this.configManager = configManager;
         refreshWorldConfig();
     }
+
+    public PhantomControl getPlugin() { return plugin; }
+    public yyz.chl.phantomcontrol.util.PluginLifecycle getLifecycle() { return lifecycle; }
 
     public void reloadConfig() {
         refreshWorldConfig();
@@ -60,6 +65,11 @@ public class PhantomManager {
     }
 
     public boolean setPhantomsEnabled(Player player, boolean enabled, PhantomStatusChangeSource source) {
+        return lifecycle == null ? changeStatus(player, enabled, source)
+                : lifecycle.callIfRunning(() -> changeStatus(player, enabled, source), false);
+    }
+
+    private boolean changeStatus(Player player, boolean enabled, PhantomStatusChangeSource source) {
         if (source == null) {
             source = PhantomStatusChangeSource.PLUGIN;
         }

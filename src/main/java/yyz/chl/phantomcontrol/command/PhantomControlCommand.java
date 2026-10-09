@@ -19,6 +19,7 @@ import yyz.chl.phantomcontrol.util.MessageUtil;
 public class PhantomControlCommand implements CommandExecutor {
     
     private final PhantomControl plugin;
+    private final yyz.chl.phantomcontrol.util.PluginLifecycle lifecycle;
     private final PhantomManager phantomManager;
     private final ConfigManager configManager;
     private final GUIManager guiManager;
@@ -30,6 +31,7 @@ public class PhantomControlCommand implements CommandExecutor {
                                   ConfigManager configManager, GUIManager guiManager, MessageUtil messageUtil,
                                   String registeredMainCommand, String registeredReloadCommand) {
         this.plugin = plugin;
+        this.lifecycle = plugin.getLifecycle();
         this.phantomManager = phantomManager;
         this.configManager = configManager;
         this.guiManager = guiManager;
@@ -148,7 +150,7 @@ public class PhantomControlCommand implements CommandExecutor {
         String targetPlayerName = args[2];
 
         performAdminAction(targetPlayerName, adminSubCommand).whenComplete((result, error) ->
-                player.getScheduler().run(plugin, task -> {
+                lifecycle.entity(player, () -> {
                     if (error != null || (result.found() && !result.success())) {
                         messageUtil.sendMessage(player, configManager.formatMessage(player,
                                 "admin.change-failed", "%player%", targetPlayerName));
@@ -166,7 +168,7 @@ public class PhantomControlCommand implements CommandExecutor {
                         messageUtil.sendMessage(player, configManager.formatMessage(player,
                                 "admin." + adminSubCommand + "-success", "%player%", targetPlayerName));
                     }
-                }, () -> {}));
+                }));
     }
 
     private record AdminResult(boolean found, boolean success, boolean enabled, boolean offline) {}
@@ -175,12 +177,12 @@ public class PhantomControlCommand implements CommandExecutor {
         Player online = Bukkit.getPlayer(name);
         if (online != null) return performOnlineAction(online, action);
         CompletableFuture<AdminResult> result = new CompletableFuture<>();
-        Bukkit.getAsyncScheduler().runNow(plugin, task -> {
+        lifecycle.async(() -> {
             try {
                 OfflinePlayer offline = resolveOfflinePlayer(name);
                 if (offline == null) {
                     result.complete(new AdminResult(false, false, true, true));
-                    return;
+                    return null;
                 }
                 Player joined = Bukkit.getPlayer(offline.getUniqueId());
                 CompletableFuture<AdminResult> operation;
@@ -198,24 +200,20 @@ public class PhantomControlCommand implements CommandExecutor {
                     else result.complete(value);
                 });
             } catch (RuntimeException error) { result.completeExceptionally(error); }
-        });
+            return null;
+        }).exceptionally(error -> { result.completeExceptionally(error); return null; });
         return result;
     }
 
     private CompletableFuture<AdminResult> performOnlineAction(Player target, String action) {
-        CompletableFuture<AdminResult> result = new CompletableFuture<>();
-        Runnable retired = () -> result.complete(new AdminResult(true, false, true, false));
-        if (target.getScheduler().run(plugin, task -> {
-            try {
-                boolean success = switch (action) {
-                    case "enable" -> enablePlayer(target, PhantomStatusChangeSource.ADMIN_COMMAND);
-                    case "disable" -> disablePlayer(target, PhantomStatusChangeSource.ADMIN_COMMAND);
-                    default -> true;
-                };
-                result.complete(new AdminResult(true, success, phantomManager.hasPhantomsEnabled(target), false));
-            } catch (RuntimeException error) { result.completeExceptionally(error); }
-        }, retired) == null) retired.run();
-        return result;
+        return lifecycle.entity(target, () -> {
+            boolean success = switch (action) {
+                case "enable" -> enablePlayer(target, PhantomStatusChangeSource.ADMIN_COMMAND);
+                case "disable" -> disablePlayer(target, PhantomStatusChangeSource.ADMIN_COMMAND);
+                default -> true;
+            };
+            return new AdminResult(true, success, phantomManager.hasPhantomsEnabled(target), false);
+        });
     }
 
     private void showHelp(Player player) {
@@ -259,14 +257,14 @@ public class PhantomControlCommand implements CommandExecutor {
                     .handle((result, error) -> error == null && result.found() && result.success()));
         }
         CompletableFuture.allOf(operations.toArray(CompletableFuture[]::new)).thenRun(() ->
-                player.getScheduler().run(plugin, task -> {
+                lifecycle.entity(player, () -> {
                     long successCount = operations.stream().filter(CompletableFuture::join).count();
                     String action = configManager.getMessage(player, batchSubCommand.equals("enable")
                             ? "command.status_enabled" : "command.status_disabled");
                     messageUtil.sendMessage(player, configManager.formatMessage(player, "admin.batch-success",
                             "%action%", action, "%success%", String.valueOf(successCount),
                             "%fail%", String.valueOf(operations.size() - successCount)));
-                }, () -> {}));
+                }));
     }
 
     private boolean enablePlayer(Player player) {

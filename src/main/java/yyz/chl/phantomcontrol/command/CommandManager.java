@@ -31,6 +31,7 @@ public class CommandManager {
     private final Set<String> registeredMainAliases;
     private final String registeredReloadCommand;
     private final Set<String> registeredReloadAliases;
+    private final List<Command> ownedCommands = new ArrayList<>();
     
     public CommandManager(PhantomControl plugin, ConfigManager configManager, 
                            PhantomManager phantomManager, GUIManager guiManager, MessageUtil messageUtil) {
@@ -155,7 +156,50 @@ public class CommandManager {
         }
 
         DynamicPluginCommand dynamicCommand = new DynamicPluginCommand(commandName, availableAliases, plugin, executor, tabCompleter);
+        ownedCommands.add(dynamicCommand);
         commandMap.register(plugin.getName().toLowerCase(), dynamicCommand);
+    }
+
+    public void unregisterCommands() {
+        unregisterHelpTopics();
+        if (knownCommands != null) {
+            // Modern Paper's command map does not support Iterator.remove().
+            for (var entry : new ArrayList<>(knownCommands.entrySet())) {
+                if (ownedCommands.contains(entry.getValue())) knownCommands.remove(entry.getKey(), entry.getValue());
+            }
+        }
+        if (commandMap != null) ownedCommands.forEach(command -> command.unregister(commandMap));
+        ownedCommands.clear();
+    }
+
+    private void unregisterHelpTopics() {
+        var help = plugin.getServer().getHelpMap();
+        var topics = new ArrayList<>(help.getHelpTopics());
+        var owned = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<org.bukkit.help.HelpTopic, Boolean>());
+        try {
+            Field commandField = org.bukkit.help.GenericCommandHelpTopic.class.getDeclaredField("command");
+            commandField.setAccessible(true);
+            Field childrenField = org.bukkit.help.IndexHelpTopic.class.getDeclaredField("allTopics");
+            childrenField.setAccessible(true);
+            if (help.getHelpTopic("") != null) topics.add(help.getHelpTopic(""));
+            for (var topic : topics) {
+                if (topic instanceof org.bukkit.help.GenericCommandHelpTopic && ownedCommands.contains(commandField.get(topic))) owned.add(topic);
+                if (topic.getClass().getName().equals("org.bukkit.craftbukkit.help.CommandAliasHelpTopic")
+                        && knownCommands != null && topic.getName().startsWith("/")
+                        && ownedCommands.contains(knownCommands.get(topic.getName().substring(1)))) owned.add(topic);
+            }
+            // The core's plugin index holds a separate collection; removing only the root help topic leaks commands.
+            for (var topic : topics) {
+                if (topic instanceof org.bukkit.help.IndexHelpTopic) {
+                    var children = (java.util.Collection<?>) childrenField.get(topic);
+                    if (topic.getName().equals(plugin.getName()) && !children.isEmpty() && children.stream().allMatch(owned::contains)) owned.add(topic);
+                    children.removeIf(owned::contains);
+                }
+            }
+            help.getHelpTopics().removeIf(owned::contains);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("无法注销本插件的命令帮助", error);
+        }
     }
 
     private static class DynamicPluginCommand extends Command implements PluginIdentifiableCommand {
@@ -163,18 +207,20 @@ public class CommandManager {
         private final Plugin plugin;
         private final CommandExecutor executor;
         private final TabCompleter tabCompleter;
+        private final yyz.chl.phantomcontrol.util.PluginLifecycle lifecycle;
 
         private DynamicPluginCommand(String name, List<String> aliases, Plugin plugin,
                                      CommandExecutor executor, TabCompleter tabCompleter) {
             super(name, "", "/" + name, aliases);
             this.plugin = plugin;
+            this.lifecycle = ((PhantomControl) plugin).getLifecycle();
             this.executor = executor;
             this.tabCompleter = tabCompleter;
         }
 
         @Override
         public boolean execute(CommandSender sender, String commandLabel, String[] args) {
-            return executor.onCommand(sender, this, commandLabel, args);
+            return lifecycle.callIfRunning(() -> executor.onCommand(sender, this, commandLabel, args), true);
         }
 
         @Override

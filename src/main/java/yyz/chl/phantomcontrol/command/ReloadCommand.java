@@ -11,10 +11,12 @@ import java.util.logging.Level;
 public class ReloadCommand implements CommandExecutor {
     
     private final PhantomControl plugin;
+    private final yyz.chl.phantomcontrol.util.PluginLifecycle lifecycle;
     private final ConfigManager configManager;
     
     public ReloadCommand(PhantomControl plugin, ConfigManager configManager) {
         this.plugin = plugin;
+        this.lifecycle = plugin.getLifecycle();
         this.configManager = configManager;
     }
     
@@ -40,9 +42,9 @@ public class ReloadCommand implements CommandExecutor {
                 plugin.getLogger().info(sender.getName() + " 重载了插件配置");
             };
             if (sender instanceof org.bukkit.entity.Player player) {
-                player.getScheduler().run(plugin, task -> reply.run(), () -> {});
+                lifecycle.entity(player, reply);
             } else {
-                org.bukkit.Bukkit.getGlobalRegionScheduler().execute(plugin, reply);
+                lifecycle.global(reply, false);
             }
         });
 
