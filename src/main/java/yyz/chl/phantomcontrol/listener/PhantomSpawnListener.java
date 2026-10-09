@@ -35,7 +35,8 @@ public class PhantomSpawnListener implements Listener {
 
         if (!phantomManager.isWorldAllowed(target.getWorld().getName())) return;
 
-        if (!phantomManager.hasPhantomsEnabled(target)) {
+        // Membership can expire while the player remains online in the same world.
+        if (phantomManager.canDisablePhantoms(target) && !phantomManager.hasPhantomsEnabled(target)) {
             event.setCancelled(true);
             event.setShouldAbortSpawn(true);
             plugin.getServer().getPluginManager().callEvent(

@@ -86,7 +86,8 @@ public class GUIManager {
     }
     
     public boolean isPhantomControlInventory(Inventory inventory) {
-        return inventory != null && inventory.getHolder() instanceof GUIHolder;
+        // Identity checks must not copy and decode ordinary block-container contents.
+        return inventory != null && inventory.getHolder(false) instanceof GUIHolder;
     }
     
     public void updateGUI(Player player) {
