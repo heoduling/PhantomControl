@@ -1,8 +1,8 @@
-> 此分支修复版：**2.1.1-3**。已移除 bStats，支持指定版本 PlugManX 的受控热加载；完整变更和隔离服测试见 [FIXES.md](FIXES.md)。
+> 此分支修复版：**2.1.1-4**。修复关服/热卸载时不可修改帮助索引导致的异常；保留 bStats 移除和指定版本 PlugManX 的受控热加载。完整变更和隔离服测试见 [FIXES.md](FIXES.md)。
 
 # PhantomControl 插件文档
 
-![Version](https://img.shields.io/badge/版本-v2.1.1-blue)
+![Version](https://img.shields.io/badge/版本-v2.1.1--4-blue)
 ![License](https://img.shields.io/badge/开源许可证-AGPL3-green)
 ![Minecraft](https://img.shields.io/badge/Minecraft-1.20.1%2B-orange)
 ![Folia](https://img.shields.io/badge/Folia-支持-brightgreen)
@@ -53,7 +53,7 @@ Minecraft 高版本机制中，长时间未睡觉的玩家会被幻翼攻击，�
 
 ### 安装步骤
 
-1. 下载最新版本 `PhantomControl-2.1.1.jar` 插件文件
+1. 下载修复版 `PhantomControl-2.1.1-4.jar` 插件文件
 
 2. 将插件放入服务器 `plugins` 文件夹
 

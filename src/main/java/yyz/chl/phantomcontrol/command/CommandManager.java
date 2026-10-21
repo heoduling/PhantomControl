@@ -193,7 +193,17 @@ public class CommandManager {
                 if (topic instanceof org.bukkit.help.IndexHelpTopic) {
                     var children = (java.util.Collection<?>) childrenField.get(topic);
                     if (topic.getName().equals(plugin.getName()) && !children.isEmpty() && children.stream().allMatch(owned::contains)) owned.add(topic);
-                    children.removeIf(owned::contains);
+                    // Other plugins can install immutable (even empty) help indexes.
+                    // Keep mutable live views intact so later commands still appear.
+                    if (children.stream().anyMatch(owned::contains)) {
+                        try {
+                            children.removeIf(owned::contains);
+                        } catch (UnsupportedOperationException immutable) {
+                            var remaining = new ArrayList<>(children);
+                            remaining.removeIf(owned::contains);
+                            childrenField.set(topic, remaining);
+                        }
+                    }
                 }
             }
             help.getHelpTopics().removeIf(owned::contains);
