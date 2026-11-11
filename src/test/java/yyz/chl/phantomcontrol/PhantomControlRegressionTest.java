@@ -1,6 +1,7 @@
 package yyz.chl.phantomcontrol;
 
-import com.destroystokyo.paper.event.entity.PhantomPreSpawnEvent;
+import org.bukkit.entity.Phantom;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.Server;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
@@ -121,12 +122,19 @@ class PhantomControlRegressionTest {
                     when(player.getWorld()).thenReturn(world);
                     when(database.getPlayerPhantomsStatus(id)).thenReturn(enabled);
                     PhantomManager manager = new PhantomManager(plugin, database, config);
-                    PhantomPreSpawnEvent event = mock(PhantomPreSpawnEvent.class);
-                    when(event.getSpawningEntity()).thenReturn(player);
-                    new PhantomSpawnListener(plugin, manager, config).onPhantomPreSpawn(event);
+                    Phantom phantom = mock(Phantom.class);
+                    when(phantom.getSpawningEntity()).thenReturn(id);
+                    when(server.getPlayer(id)).thenReturn(player);
+                    when(server.isOwnedByCurrentRegion(player)).thenReturn(true);
+                    CreatureSpawnEvent event = mock(CreatureSpawnEvent.class);
+                    when(event.getEntity()).thenReturn(phantom);
+                    when(event.getSpawnReason()).thenReturn(CreatureSpawnEvent.SpawnReason.NATURAL);
+                    new PhantomSpawnListener(plugin, manager, config).onCreatureSpawn(event);
                     int expected = permitted && !enabled && allowed ? 1 : 0;
                     verify(event, times(expected)).setCancelled(true);
-                    verify(event, times(expected)).setShouldAbortSpawn(true);
+                    verify(server.getPluginManager(), times(expected)).callEvent(
+                            argThat(blocked -> blocked instanceof yyz.chl.phantomcontrol.event.PhantomSpawnBlockedEvent notification
+                                    && notification.getPlayer() == player && notification.getSpawnReason().equals("NATURAL")));
                     verify(database, never()).setPlayerPhantomsStatus(any(), anyBoolean());
                 }
             }
